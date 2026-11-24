@@ -1,0 +1,323 @@
+
+
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SH1106.h>
+#include <LiquidCrystal_I2C.h>
+#include <RTClib.h>
+#include <Stepper.h>
+#include <SoftwareSerial.h>
+
+// ================= BUZZER =================
+#define BUZZER_PIN 12
+
+// ================= SIM900A =================
+#define SIM_TX 6   
+#define SIM_RX 7  
+
+SoftwareSerial sim900(SIM_TX, SIM_RX);
+
+const char phoneNumber[] = "+639686170730"; // 
+
+// ================= OLED =================
+#define OLED_RESET -1
+Adafruit_SH1106 display(OLED_RESET);
+
+// ================= STEPPER =================
+#define STEPS_PER_REV 2048
+#define TOTAL_ITEMS 8
+#define STEPS_PER_SHAPE (STEPS_PER_REV / TOTAL_ITEMS)
+
+Stepper stepperMotor(STEPS_PER_REV, 8, 10, 9, 11);
+int currentStepperIndex = 0;
+
+// ================= LCD =================
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+// ================= RTC =================
+RTC_DS3231 rtc;
+
+// ================= BUTTONS =================
+#define BTN_NEXT 2
+#define BTN_BACK 3
+#define BTN_DISPENSE 4
+#define BTN_CONFIRM 5
+
+// ================= MENU =================
+const char* menuItems[] = {
+  "[Atorvastatin]",
+  "[Amlodipin]",
+  "[Metformin]",
+  "[Losartan]",
+  "[Tamoxifen]",
+  "[Tamsulosin]",
+  "[Finasteride]",
+  "[]"
+};
+
+int currentItem = 0;
+int menuStart = 0;
+
+// ================= STATES =================
+int lastNext = HIGH;
+int lastBack = HIGH;
+int lastDispense = HIGH;
+int lastConfirm = HIGH;
+
+bool buzzerActive = false;
+
+// ================= SETUP =================
+void setup() {
+  pinMode(BTN_NEXT, INPUT_PULLUP);
+  pinMode(BTN_BACK, INPUT_PULLUP);
+  pinMode(BTN_DISPENSE, INPUT_PULLUP);
+  pinMode(BTN_CONFIRM, INPUT_PULLUP);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  Wire.begin();
+
+  display.begin(SH1106_SWITCHCAPVCC, 0x3C);
+  display.clearDisplay();
+  display.display();
+
+  lcd.init();
+  lcd.backlight();
+
+  stepperMotor.setSpeed(12);
+
+  if (!rtc.begin()) {
+    lcd.clear();
+    lcd.print("RTC not found");
+    while (1);
+  }
+
+  if (rtc.lostPower()) {
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+
+  sim900.begin(9600);
+  delay(1000);
+  sim900.println("AT");
+  delay(1000);
+  sim900.println("AT+CMGF=1");
+  delay(1000);
+
+  updateOLED();
+  updateLCD();
+}
+
+// ================= LOOP =================
+void loop() {
+  int nextState = digitalRead(BTN_NEXT);
+  int backState = digitalRead(BTN_BACK);
+  int dispenseState = digitalRead(BTN_DISPENSE);
+  int confirmState = digitalRead(BTN_CONFIRM);
+
+  // NEXT
+  if (lastNext == HIGH && nextState == LOW) {
+    currentItem = (currentItem + 1) % TOTAL_ITEMS;
+    adjustMenu();
+    updateOLED();
+    updateLCD();
+    delay(200);
+  }
+
+  // BACK
+  if (lastBack == HIGH && backState == LOW) {
+    currentItem--;
+    if (currentItem < 0) currentItem = TOTAL_ITEMS - 1;
+    adjustMenu();
+    updateOLED();
+    updateLCD();
+    delay(200);
+  }
+
+  // DISPENSE + BUZZER
+  if (lastDispense == HIGH && dispenseState == LOW && !buzzerActive) {
+    dispenseMedicine();
+    digitalWrite(BUZZER_PIN, HIGH);
+    buzzerActive = true;
+    delay(300);
+  }
+
+  // CONFIRM → STOP BUZZER + SEND SMS
+  if (lastConfirm == HIGH && confirmState == LOW && buzzerActive) {
+    digitalWrite(BUZZER_PIN, LOW);
+    buzzerActive = false;
+    sendConfirmationSMS();
+    delay(300);
+  }
+
+  lastNext = nextState;
+  lastBack = backState;
+  lastDispense = dispenseState;
+  lastConfirm = confirmState;
+}
+
+// ================= MENU SCROLL =================
+void adjustMenu() {
+  if (currentItem < menuStart) menuStart = currentItem;
+  if (currentItem >= menuStart + 4) menuStart = currentItem - 3;
+}
+
+// ================= DISPENSE =================
+void dispenseMedicine() {
+  lcd.clear();
+  lcd.setCursor(0,1);
+  lcd.print("Dispensing...");
+  lcd.setCursor(0,2);
+  lcd.print(menuItems[currentItem]);
+
+  int diff = currentItem - currentStepperIndex;
+  int steps = diff * STEPS_PER_SHAPE;
+
+  stepperMotor.step(-steps);
+  currentStepperIndex = currentItem;
+
+  delay(1000);
+  updateLCD();
+}
+
+// ================= SMS =================
+void sendConfirmationSMS() {
+  lcd.clear();
+  lcd.setCursor(0,1);
+  lcd.print("Sending SMS...");
+
+  sim900.print("AT+CMGS=\"");
+  sim900.print(phoneNumber);
+  sim900.println("\"");
+  delay(1000);
+
+  sim900.print("Medicine taken: ");
+  sim900.print(menuItems[currentItem]);
+  sim900.write(26);
+
+  delay(4000);
+  lcd.clear();
+  lcd.setCursor(0,1);
+  lcd.print("SMS Sent!");
+  delay(1500);
+  updateLCD();
+}
+
+// ================= OLED =================
+void updateOLED() {
+  display.clearDisplay();
+  switch (currentItem) {
+    case 0: drawSun(); break;
+    case 1: drawHexagon(); break;
+    case 2: drawOval(); break;
+    case 3: drawRectangle(); break;
+    case 4: drawHeart(); break;
+    case 5: drawStar(); break;
+    case 6: drawOctagon(); break;
+    case 7: drawMoustache(); break;
+  }
+  display.display();
+}
+
+// ================= LCD =================
+void updateLCD() {
+  lcd.clear();
+  for (int row = 0; row < 4; row++) {
+    int idx = menuStart + row;
+    if (idx >= TOTAL_ITEMS) break;
+    lcd.setCursor(0, row);
+    if (idx == currentItem) lcd.print("> ");
+    else lcd.print("  ");
+    lcd.print(menuItems[idx]);
+  }
+}
+// ================= SHAPES =================
+void drawSun() {
+  int cx = 64, cy = 32;
+  display.drawCircle(cx, cy, 10, WHITE);
+  display.drawCircle(cx, cy, 9, WHITE);
+
+  display.drawLine(cx, cy - 18, cx, cy - 28, WHITE); // up
+  display.drawLine(cx, cy + 18, cx, cy + 28, WHITE); // down
+  display.drawLine(cx - 18, cy, cx - 28, cy, WHITE); // left
+  display.drawLine(cx + 18, cy, cx + 28, cy, WHITE); // right
+
+  display.drawLine(cx - 13, cy - 13, cx - 22, cy - 22, WHITE);
+  display.drawLine(cx + 13, cy - 13, cx + 22, cy - 22, WHITE);
+  display.drawLine(cx - 13, cy + 13, cx - 22, cy + 22, WHITE);
+  display.drawLine(cx + 13, cy + 13, cx + 22, cy + 22, WHITE);
+
+  display.drawLine(cx, cy - 14, cx, cy - 18, WHITE);
+  display.drawLine(cx, cy + 14, cx, cy + 18, WHITE);
+  display.drawLine(cx - 14, cy, cx - 18, cy, WHITE);
+  display.drawLine(cx + 14, cy, cx + 18, cy, WHITE);
+}
+
+// HEXAGON FILLED
+void drawHexagon() {
+  int cx = 64, cy = 32;
+  int size = 20;
+
+  int x[6];
+  int y[6];
+
+  for(int i=0; i<6; i++){
+    x[i] = cx + size * cos(PI/3 * i);
+    y[i] = cy + size * sin(PI/3 * i);
+  }
+
+  // Fill using triangles
+  for (int i=1; i<5; i++){
+    display.fillTriangle(x[0], y[0], x[i], y[i], x[i+1], y[i+1], WHITE);
+  }
+
+  // Outline
+  for (int i=0; i<6; i++){
+    display.drawLine(x[i], y[i], x[(i+1)%6], y[(i+1)%6], WHITE);
+  }
+}
+
+void drawOval() { display.drawRoundRect(44, 20, 40, 24, 12, WHITE); }
+void drawRectangle() { display.drawRect(44, 18, 40, 28, WHITE); }
+void drawHeart() {
+  int cx = 64, cy = 28;
+  display.drawLine(cx - 12, cy, cx - 6, cy - 6, WHITE);
+  display.drawLine(cx - 6, cy - 6, cx, cy - 2, WHITE);
+  display.drawLine(cx + 12, cy, cx + 6, cy - 6, WHITE);
+  display.drawLine(cx + 6, cy - 6, cx, cy - 2, WHITE);
+  display.drawLine(cx - 12, cy, cx - 6, cy + 8, WHITE);
+  display.drawLine(cx - 6, cy + 8, cx, cy + 16, WHITE);
+  display.drawLine(cx + 12, cy, cx + 6, cy + 8, WHITE);
+  display.drawLine(cx + 6, cy + 8, cx, cy + 16, WHITE);
+}
+void drawStar() {
+  int cx=64, cy=32;
+  int x[10] = {cx, cx+6, cx+18, cx+8, cx+12, cx, cx-12, cx-8, cx-18, cx-6};
+  int y[10] = {cy-18, cy-6, cy-6, cy+2, cy+16, cy+6, cy+16, cy+2, cy-6, cy-6};
+  for (int i=0;i<10;i++) display.drawLine(x[i], y[i], x[(i+1)%10], y[(i+1)%10], WHITE);
+}
+void drawOctagon() {
+  int cx = 64, cy = 32, s = 14;
+  display.drawLine(cx - s, cy - s/2, cx - s/2, cy - s, WHITE);
+  display.drawLine(cx - s/2, cy - s, cx + s/2, cy - s, WHITE);
+  display.drawLine(cx + s/2, cy - s, cx + s, cy - s/2, WHITE);
+  display.drawLine(cx + s, cy - s/2, cx + s, cy + s/2, WHITE);
+  display.drawLine(cx + s, cy + s/2, cx + s/2, cy + s, WHITE);
+  display.drawLine(cx + s/2, cy + s, cx - s/2, cy + s, WHITE);
+  display.drawLine(cx - s/2, cy + s, cx - s, cy + s/2, WHITE);
+  display.drawLine(cx - s, cy + s/2, cx - s, cy - s/2, WHITE);
+}
+void drawMoustache() {
+  int cx = 64, cy = 32;
+  display.fillCircle(cx - 10, cy, 5, WHITE);
+  display.fillCircle(cx - 16, cy - 2, 4, WHITE);
+  display.fillCircle(cx - 22, cy - 6, 3, WHITE);
+  display.drawLine(cx - 26, cy - 10, cx - 22, cy - 6, WHITE);
+  display.drawLine(cx - 26, cy - 10, cx - 21, cy - 4, WHITE);
+  display.fillCircle(cx + 10, cy, 5, WHITE);
+  display.fillCircle(cx + 16, cy - 2, 4, WHITE);
+  display.fillCircle(cx + 22, cy - 6, 3, WHITE);
+  display.drawLine(cx + 26, cy - 10, cx + 22, cy - 6, WHITE);
+  display.drawLine(cx + 26, cy - 10, cx + 21, cy - 4, WHITE);
+  display.fillRect(cx - 4, cy - 1, 8, 3, WHITE);
+}
